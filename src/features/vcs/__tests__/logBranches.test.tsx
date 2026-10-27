@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Branch, BranchInfo } from "@/bindings";
 import { isMacHost } from "@/platform/keymap";
 
@@ -79,11 +79,36 @@ describe("Git Log branches pane", () => {
     expect(useGitLog.getState().filters.branches).toEqual(["HEAD"]);
   });
 
+  it("Enter switches the log to every selected branch, in tree order", () => {
+    useVcs.setState({ branches: [b("main", { current: true }), b("beta"), b("alpha")] });
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("beta"));
+    fireEvent.mouseDown(screen.getByText("alpha"), cmd());
+    expect(useGitLog.getState().filters.branches).toEqual([]);
+    fireEvent.keyDown(screen.getByRole("tree", { name: "Branches" }), { key: "Enter" });
+    expect(useGitLog.getState().filters.branches).toEqual(["alpha", "beta"]);
+  });
+
+  it("follows the log filter when it changes elsewhere", () => {
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("main"));
+    act(() => useGitLog.setState({ filters: { ...emptyFilters(), branches: ["feature"] } }));
+    expect(screen.getByText("feature").closest("[data-row]")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("main").closest("[data-row]")).toHaveAttribute("aria-selected", "false");
+  });
+
   it("copies the selected branch name", async () => {
     render(<BranchesPanel />);
     fireEvent.mouseDown(screen.getByText("feature"));
     fireEvent.keyDown(screen.getByText("feature"), { key: "c", ...cmd() });
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("feature"));
+  });
+
+  it("copies HEAD as HEAD", async () => {
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("HEAD (Current Branch)"));
+    fireEvent.keyDown(screen.getByText("HEAD (Current Branch)"), { key: "c", ...cmd() });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("HEAD"));
   });
 
   it("copies the folder path along with the branch name", async () => {

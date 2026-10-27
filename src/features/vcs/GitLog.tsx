@@ -185,10 +185,7 @@ export function BranchesPanel() {
   // Highlighted rows: a click only selects (IDEA), and only a double click or
   // Enter switches the log, so the selection is the pane's own state. It still
   // follows the filter when something else changes it (Show Log, the filter bar).
-  const filterKeys = useMemo(
-    () => filterBranches.map((b) => (b === "HEAD" ? "head" : `b:${b}`)),
-    [filterBranches],
-  );
+  const filterKeys = useMemo(() => filterBranches.map((b) => (b === "HEAD" ? "head" : `b:${b}`)), [filterBranches]);
   const filterKey = filterKeys.join("\n");
   const [shownKey, setShownKey] = useState(filterKey);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(filterKeys));
@@ -263,9 +260,11 @@ export function BranchesPanel() {
         selected={selected}
         onSelectionChange={(sel) => setSelected(sel)}
         onActivate={(n) => {
-          // IDEA: double click (or Enter) switches the log to that ref;
-          // checking out stays in the context menu.
-          if (n.ref) setLogFilters({ branches: [n.ref] });
+          // IDEA: double click (or Enter) switches the log to that ref, or to every
+          // selected one when it is part of a multi-selection; checking out stays in the context menu.
+          if (!n.ref) return;
+          const sel = selected.has(n.key) ? refs.filter((r) => selected.has(r.key)).map((r) => r.ref) : [n.ref];
+          setLogFilters({ branches: sel });
         }}
         onContextMenu={(n, _s, e) => {
           const items = n?.branch ? branchMenu(n.branch, current) : [];
