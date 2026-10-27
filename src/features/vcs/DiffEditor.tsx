@@ -475,6 +475,10 @@ export function DiffEditor({ input }: { input: EditorInput }) {
       <div className={styles.toolbar} role="toolbar" aria-label={tx("Diff")}>
         <IconButton icon="arrow-up" title="Previous Difference" shortcut={shortcutLabel("diff.prevDifference")} size="small" onClick={() => step(-1)} />
         <IconButton icon="arrow-down" title="Next Difference" shortcut={shortcutLabel("diff.nextDifference")} size="small" onClick={() => step(1)} />
+        {/* IDEA: jumping to the source belongs to the navigation group, with a pencil. */}
+        {hasSource && (
+          <IconButton icon="edit" title="Jump to Source" shortcut={shortcutLabel("diff.jumpToSource")} size="small" onClick={jumpToSource} />
+        )}
         <span className={styles.sep} />
         <IconButton
           icon="split"
@@ -538,9 +542,6 @@ export function DiffEditor({ input }: { input: EditorInput }) {
         )}
         <span className={styles.sep} />
         <IconButton icon="refresh" title="Refresh" size="small" onClick={() => void reload()} />
-        {hasSource && (
-          <IconButton icon="external-link" title="Jump to Source" shortcut={shortcutLabel("diff.jumpToSource")} size="small" onClick={jumpToSource} />
-        )}
         <span className={styles.count}>
           {!ready
             ? ""
