@@ -372,13 +372,30 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     [updateChunkInfo, data],
   );
 
+  // A file-backed side is the source. For a revision diff (Git Log, Compare) the
+  // working copy is, as in IDEA, as long as the file still exists.
+  const fileSource = sideFile(left, path) ?? sideFile(right, path);
+  const [worktreeSource, setWorktreeSource] = useState<string | null>(null);
+  useEffect(() => {
+    if (fileSource) return;
+    let alive = true;
+    void call(commands.fsProbe(path)).then(
+      () => alive && setWorktreeSource(path),
+      () => alive && setWorktreeSource(null),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [path, fileSource]);
+  const source = fileSource ?? worktreeSource;
+
   const jumpToSource = useCallback(() => {
     const views = viewsRef.current;
     const fileA = sideFile(left, path);
     const fileB = sideFile(right, path);
     const useA = focusedSide.current === "a" && !!views?.a && !!fileA;
     const v = useA ? views!.a! : views?.b;
-    const file = useA ? fileA : (fileB ?? fileA);
+    const file = useA ? fileA : (fileB ?? fileA ?? worktreeSource);
     if (!file) return;
     const head = v ? v.state.selection.main.head : 0;
     const line = v ? v.state.doc.lineAt(head) : null;
@@ -386,7 +403,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
       selection: { line: line ? line.number - 1 : 0, col: line ? head - line.from : 0 },
       focus: true,
     });
-  }, [left, right, path]);
+  }, [left, right, path, worktreeSource]);
 
   const currentChunk = (): { chunk: Chunk; index: number } | undefined => {
     const v = viewsRef.current?.b;
@@ -456,7 +473,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
   const identical = ready && chunkInfo.count === 0 && (attached?.a?.text() ?? statics?.a) === (attached?.b?.text() ?? statics?.b);
   // Staging applies to local changes against HEAD / the index only.
   const canStage = editableB && isWorktree(right) && left.type === "rev" && !!useVcs.getState().root;
-  const hasSource = !!sideFile(left, path) || !!sideFile(right, path);
+  const hasSource = !!source;
 
   return (
     <div
