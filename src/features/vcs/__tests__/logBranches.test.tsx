@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Branch, BranchInfo } from "@/bindings";
+import { isMacHost } from "@/platform/keymap";
 
 vi.mock("@/platform/ipc", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/platform/ipc")>();
@@ -41,7 +42,13 @@ const head: BranchInfo = {
   operation: null,
 };
 
+const writeText = vi.fn().mockResolvedValue(undefined);
+/** The copy modifier on this host: ⌘ on macOS, Ctrl elsewhere. */
+const cmd = () => (isMacHost() ? { metaKey: true } : { ctrlKey: true });
+
 beforeEach(() => {
+  writeText.mockClear();
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   useVcs.setState({ root: "/p", repo: "/p", branches, branchesLoaded: true, branch: head });
   useGitLog.setState({ filters: emptyFilters() });
 });
@@ -70,5 +77,40 @@ describe("Git Log branches pane", () => {
     render(<BranchesPanel />);
     fireEvent.doubleClick(screen.getByText("HEAD (Current Branch)"));
     expect(useGitLog.getState().filters.branches).toEqual(["HEAD"]);
+  });
+
+  it("copies the selected branch name", async () => {
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("feature"));
+    fireEvent.keyDown(screen.getByText("feature"), { key: "c", ...cmd() });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("feature"));
+  });
+
+  it("copies the folder path along with the branch name", async () => {
+    useVcs.setState({
+      branches: [b("feat/idea-parity", { current: true, commit: "1" })],
+      branch: { ...head, head: "feat/idea-parity" },
+    });
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("idea-parity"));
+    fireEvent.keyDown(screen.getByText("idea-parity"), { key: "c", ...cmd() });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("feat/idea-parity"));
+  });
+
+  it("copies every selected branch, one per line, in tree order", async () => {
+    useVcs.setState({ branches: [b("main", { current: true }), b("beta"), b("alpha")] });
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("beta"), cmd());
+    fireEvent.mouseDown(screen.getByText("alpha"), cmd());
+    fireEvent.keyDown(screen.getByText("alpha"), { key: "c", ...cmd() });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("alpha\nbeta"));
+  });
+
+  it("leaves Cmd/Ctrl+C in the branch search field alone", async () => {
+    render(<BranchesPanel />);
+    fireEvent.mouseDown(screen.getByText("feature"));
+    fireEvent.keyDown(screen.getByLabelText("Filter branches"), { key: "c", ...cmd() });
+    await Promise.resolve();
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

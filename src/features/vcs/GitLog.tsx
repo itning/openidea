@@ -30,7 +30,9 @@ import {
   showContextMenu,
   type MenuItem,
   T,
+  copyText,
 } from "@/ui";
+import { hasPrimaryModifier } from "@/platform/keymap";
 import { commitFileDiffData, openDiff, revisionChangeDiffData, withChain } from "./diffInput";
 import { collapseLinear, computeGraph, hideLongEdges, laneColor, reachableFrom, type GraphRow } from "./graph";
 import {
@@ -195,8 +197,31 @@ export function BranchesPanel() {
     setShownKey(filterKey);
     setSelected(new Set(filterKeys));
   }
+  // Branches in tree order, for Copy: full refs, so the folder path comes along
+  // (`feat/x`, `origin/main`).
+  const refs = useMemo(() => {
+    const out: { key: string; ref: string }[] = [];
+    const walk = (nodes: readonly BranchTreeNode[]) => {
+      for (const n of nodes) {
+        if (n.ref) out.push({ key: n.key, ref: n.ref });
+        walk(n.children ?? []);
+      }
+    };
+    walk(allRoots);
+    return out;
+  }, [allRoots]);
+  const onKeyDownCapture = (e: KeyboardEvent<HTMLDivElement>) => {
+    if ((e.key !== "c" && e.key !== "C") || !hasPrimaryModifier(e) || e.altKey || e.shiftKey) return;
+    // The branch search keeps the browser's own copy.
+    if ((e.target as HTMLElement).closest("input, textarea")) return;
+    const names = refs.filter((r) => selected.has(r.key)).map((r) => r.ref);
+    if (!names.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void copyText(names.join("\n"));
+  };
   return (
-    <div className={styles.branches}>
+    <div className={styles.branches} onKeyDownCapture={onKeyDownCapture}>
       <div className={styles.branchesBar} role="toolbar" aria-label="Branches">
         <SearchField
           className={styles.branchSearch}
