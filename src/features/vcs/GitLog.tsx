@@ -54,7 +54,7 @@ import { refLabels, useLogOptions, type LogOptions } from "./logOptions";
 import { KIND_COLOR, baseName, formatTime, relTo, type EffectiveKind } from "./model";
 import { clearConsole, useVcsConsole } from "./ops";
 import { currentRepo, loadBranches, useVcs } from "./store";
-import { checkoutBranch, loadFavoriteBranches, newBranch, useFavoriteBranches } from "./branchOps";
+import { loadFavoriteBranches, newBranch, useFavoriteBranches } from "./branchOps";
 import { branchMenu } from "./branchMenu";
 import { branchFolderKeys, branchGroupKeys, buildBranchTree, filterBranchTree, type BranchTreeNode } from "./branches";
 import { chooseDateRange, chooseMany, promptText } from "./dialogs";
@@ -167,7 +167,7 @@ function branchDetail(n: BranchTreeNode): string | undefined {
   return [b.current ? "current" : "", sync].filter(Boolean).join("  ") || undefined;
 }
 
-function BranchesPanel() {
+export function BranchesPanel() {
   const branches = useVcs((s) => s.branches);
   const root = useVcs((s) => s.root);
   const branchesLoaded = useVcs((s) => s.branchesLoaded);
@@ -180,10 +180,21 @@ function BranchesPanel() {
   const roots = useMemo(() => filterBranchTree(allRoots, query), [allRoots, query]);
   // While searching every match is shown expanded.
   const searchExpanded = useMemo(() => (query.trim() ? new Set(branchGroupKeys(roots)) : undefined), [roots, query]);
-  const selected = useMemo(
-    () => new Set(filterBranches.map((b) => (b === "HEAD" ? "head" : `b:${b}`))),
+  // Highlighted rows: a click only selects (IDEA), and only a double click or
+  // Enter switches the log, so the selection is the pane's own state. It still
+  // follows the filter when something else changes it (Show Log, the filter bar).
+  const filterKeys = useMemo(
+    () => filterBranches.map((b) => (b === "HEAD" ? "head" : `b:${b}`)),
     [filterBranches],
   );
+  const filterKey = filterKeys.join("\n");
+  const [shownKey, setShownKey] = useState(filterKey);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(filterKeys));
+  if (shownKey !== filterKey) {
+    // The filter changed elsewhere (Show Log, the filter bar): highlight it.
+    setShownKey(filterKey);
+    setSelected(new Set(filterKeys));
+  }
   return (
     <div className={styles.branches}>
       <div className={styles.branchesBar} role="toolbar" aria-label="Branches">
@@ -225,12 +236,12 @@ function BranchesPanel() {
         }
         getDetail={branchDetail}
         selected={selected}
-        onSelectionChange={(sel) => {
-          // Several selected branches filter the log by all of them.
-          const refs = [...sel].flatMap((k) => (k === "head" ? ["HEAD"] : k.startsWith("b:") ? [k.slice(2)] : []));
-          if (refs.length) setLogFilters({ branches: refs });
+        onSelectionChange={(sel) => setSelected(sel)}
+        onActivate={(n) => {
+          // IDEA: double click (or Enter) switches the log to that ref;
+          // checking out stays in the context menu.
+          if (n.ref) setLogFilters({ branches: [n.ref] });
         }}
-        onActivate={(n) => n.branch && !n.branch.current && void checkoutBranch(n.branch.name)}
         onContextMenu={(n, _s, e) => {
           const items = n?.branch ? branchMenu(n.branch, current) : [];
           if (!items.length) return;
