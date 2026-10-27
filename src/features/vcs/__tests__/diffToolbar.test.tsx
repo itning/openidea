@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import type { EditorInput } from "@/workbench/contributions";
+import { Chunk } from "@codemirror/merge";
+import { Text } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { iconMarkup } from "@/ui";
 
 const probe = vi.fn();
+const openFile = vi.fn();
+const texts: Record<string, string> = { HEAD: "a\n", abc123: "a\n" };
+let working = "a\n";
 
 vi.mock("@/platform/ipc", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/platform/ipc")>();
@@ -12,12 +18,18 @@ vi.mock("@/platform/ipc", async (importOriginal) => {
     commands: {
       ...real.commands,
       fsProbe: (path: string) => probe(path),
-      vcsFileAt: () => Promise.resolve({ status: "ok", data: "a\n" }),
+      vcsFileAt: (_path: string, rev: string) => Promise.resolve({ status: "ok", data: texts[rev] }),
+      fsReadText: () => Promise.resolve({ status: "ok", data: working }),
     },
   };
 });
 
-import { DiffEditor } from "../DiffEditor";
+vi.mock("@/workbench/contributions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/workbench/contributions")>()),
+  editorService: () => ({ openFile }),
+}));
+
+import { DiffEditor, mapLine } from "../DiffEditor";
 
 /** Git Log opens a commit's file: both sides are revisions. */
 const input = {
@@ -35,6 +47,8 @@ const paths = (html: string) => [...html.matchAll(/ d="([^"]+)"/g)].map((m) => m
 
 beforeEach(() => {
   probe.mockReset();
+  openFile.mockReset();
+  texts.HEAD = texts.abc123 = working = "a\n";
   probe.mockResolvedValue({ status: "ok", data: { size: 3, binary: false, tooLarge: false } });
 });
 
@@ -71,5 +85,62 @@ describe("Diff toolbar", () => {
     render(<DiffEditor input={input} />);
     await waitFor(() => expect(probe).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByRole("button", { name: "Jump to Source" })).toBeNull());
+  });
+});
+
+const doc = (s: string) => Text.of(s.split("\n"));
+
+describe("mapLine", () => {
+  const from = doc("a\nb\nc\nd\ne\nf\ng\n");
+  const to = doc("a\nX\nY\nb\nc\ne\nF1\nF2\ng\n");
+  const map = (line: number) => mapLine(Chunk.build(from, to), line, from, to);
+
+  it("shifts lines past an insertion and keeps lines before it", () => {
+    expect(map(0)).toBe(0);
+    expect(map(1)).toBe(3);
+    expect(map(2)).toBe(4);
+  });
+
+  it("lands on the line after a removed block", () => {
+    expect(map(3)).toBe(5);
+    expect(map(4)).toBe(5);
+  });
+
+  it("keeps the offset inside a changed block and shifts past it", () => {
+    expect(map(5)).toBe(6);
+    expect(map(6)).toBe(8);
+  });
+});
+
+describe("Jump to Source of a revision diff", () => {
+  /** Parent, commit and working copy each add a line above the previous. */
+  const setUp = () => {
+    texts.HEAD = "a\nb\nc\nd\n";
+    texts.abc123 = "a\nX\nY\nb\nc\nd\n";
+    working = "new\na\nX\nY\nb\nc\nd\n";
+  };
+  const pane = async (index: number) => {
+    await waitFor(() => expect(document.querySelectorAll(".cm-mergeViewEditor .cm-editor").length).toBe(2));
+    return EditorView.findFromDOM(document.querySelectorAll<HTMLElement>(".cm-mergeViewEditor .cm-editor")[index]!)!;
+  };
+  const jumpFrom = async (index: number, line: number) => {
+    const v = await pane(index);
+    v.dispatch({ selection: { anchor: v.state.doc.line(line + 1).from + 1 } });
+    v.contentDOM.dispatchEvent(new FocusEvent("focus"));
+    (await screen.findByRole("button", { name: "Jump to Source" })).click();
+    await waitFor(() => expect(openFile).toHaveBeenCalled());
+    return openFile.mock.calls[0];
+  };
+
+  it("maps a line of the commit to the working copy", async () => {
+    setUp();
+    render(<DiffEditor input={input} />);
+    expect(await jumpFrom(1, 2)).toEqual(["/p/a.ts", { selection: { line: 3, col: 1 }, focus: true }]);
+  });
+
+  it("maps a line of the parent through the diff to the working copy", async () => {
+    setUp();
+    render(<DiffEditor input={input} />);
+    expect(await jumpFrom(0, 2)).toEqual(["/p/a.ts", { selection: { line: 5, col: 1 }, focus: true }]);
   });
 });

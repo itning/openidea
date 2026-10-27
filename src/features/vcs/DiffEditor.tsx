@@ -12,7 +12,7 @@ import {
   goToPreviousChunk,
   rejectChunk,
   unifiedMergeView,
-  type Chunk,
+  Chunk,
 } from "@codemirror/merge";
 import { attachDocument, embeddedEditorExtensions, type DocumentAttachment } from "@/editor/api";
 import { setContext } from "@/platform/context";
@@ -80,6 +80,23 @@ export function chunkLines(chunk: Chunk, a: Text, b: Text) {
   const [fromA, toA] = range(chunk.fromA, chunk.toA, chunk.endA, a);
   const [fromB, toB] = range(chunk.fromB, chunk.toB, chunk.endB, b);
   return { fromA: fromA!, toA: toA!, fromB: fromB!, toB: toB! };
+}
+
+/** The 0-based line of `to` matching `line` of `from`, given the chunks between them. */
+export function mapLine(chunks: readonly Chunk[], line: number, from: Text, to: Text): number {
+  const span = (start: number, end: number, doc: Text) => {
+    const first = doc.lineAt(Math.min(start, doc.length)).number - 1;
+    return [first, end > start ? doc.lineAt(Math.min(end - 1, doc.length)).number : first] as const;
+  };
+  let shift = 0;
+  for (const c of chunks) {
+    const [fromA, toA] = span(c.fromA, c.toA, from);
+    if (line < fromA) break;
+    const [fromB, toB] = span(c.fromB, c.toB, to);
+    if (line < toA) return Math.min(fromB + (line - fromA), Math.max(fromB, toB - 1));
+    shift = toB - toA;
+  }
+  return Math.max(0, Math.min(line + shift, to.lines - 1));
 }
 
 /** Joins the open document of a file-backed side (working file, Compare Files); null for revisions / texts. */
@@ -372,36 +389,47 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     [updateChunkInfo, data],
   );
 
-  // A file-backed side is the source. For a revision diff (Git Log, Compare) the
-  // working copy is, as in IDEA, as long as the file still exists.
+  // A file-backed side is the source; for a diff of revisions (Git Log, Compare) the
+  // working copy of the path is, while it exists. Probed once per diff.
   const fileSource = sideFile(left, path) ?? sideFile(right, path);
-  const [worktreeSource, setWorktreeSource] = useState<string | null>(null);
+  const [onDisk, setOnDisk] = useState<string | null>(null);
   useEffect(() => {
     if (fileSource) return;
     let alive = true;
     void call(commands.fsProbe(path)).then(
-      () => alive && setWorktreeSource(path),
-      () => alive && setWorktreeSource(null),
+      () => alive && setOnDisk(path),
+      () => alive && setOnDisk(null),
     );
     return () => {
       alive = false;
     };
   }, [path, fileSource]);
+  const worktreeSource = onDisk === path ? path : null;
   const source = fileSource ?? worktreeSource;
 
   const jumpToSource = useCallback(() => {
     const views = viewsRef.current;
     const fileA = sideFile(left, path);
     const fileB = sideFile(right, path);
-    const useA = focusedSide.current === "a" && !!views?.a && !!fileA;
-    const v = useA ? views!.a! : views?.b;
-    const file = useA ? fileA : (fileB ?? fileA ?? worktreeSource);
+    const onA = focusedSide.current === "a" && !!views?.a;
+    const v = onA ? views!.a! : views?.b;
+    const own = onA ? fileA : fileB;
+    const file = own ?? fileB ?? fileA ?? worktreeSource;
     if (!file) return;
-    const head = v ? v.state.selection.main.head : 0;
-    const line = v ? v.state.doc.lineAt(head) : null;
-    void editorService().openFile(file, {
-      selection: { line: line ? line.number - 1 : 0, col: line ? head - line.from : 0 },
-      focus: true,
+    const open = (line: number, col: number) =>
+      void editorService().openFile(file, { selection: { line, col }, focus: true });
+    if (!v) return open(0, 0);
+    const head = v.state.selection.main.head;
+    const at = v.state.doc.lineAt(head);
+    if (own) return open(at.number - 1, head - at.from);
+    // The pane shows another version of the file: follow the diff to the line there.
+    const from = v.state.doc;
+    const known = file === fileB ? views?.b.state.doc : file === fileA ? views?.a?.state.doc : undefined;
+    void (known ? Promise.resolve(known.toString()) : readWorkingText(file)).then((text) => {
+      if (text === null) return open(at.number - 1, head - at.from);
+      const to = Text.of(text.split(/\r?\n/));
+      const line = mapLine(Chunk.build(from, to), at.number - 1, from, to);
+      open(line, to.line(line + 1).text === at.text ? head - at.from : 0);
     });
   }, [left, right, path, worktreeSource]);
 
@@ -492,7 +520,6 @@ export function DiffEditor({ input }: { input: EditorInput }) {
       <div className={styles.toolbar} role="toolbar" aria-label={tx("Diff")}>
         <IconButton icon="arrow-up" title="Previous Difference" shortcut={shortcutLabel("diff.prevDifference")} size="small" onClick={() => step(-1)} />
         <IconButton icon="arrow-down" title="Next Difference" shortcut={shortcutLabel("diff.nextDifference")} size="small" onClick={() => step(1)} />
-        {/* IDEA: jumping to the source belongs to the navigation group, with a pencil. */}
         {hasSource && (
           <IconButton icon="edit" title="Jump to Source" shortcut={shortcutLabel("diff.jumpToSource")} size="small" onClick={jumpToSource} />
         )}
