@@ -4146,6 +4146,7 @@ dependencies = [
 name = "ide-jsonrpc"
 version = "0.1.17"
 dependencies = [
+ "encoding_rs",
  "futures",
  "ide-core",
  "parking_lot",

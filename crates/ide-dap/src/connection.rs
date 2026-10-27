@@ -95,7 +95,21 @@ pub struct Connection {
 
 impl Connection {
     /// Starts reader/writer tasks over `reader`/`writer`. Must be called inside a Tokio runtime.
-    pub fn start<R, W>(reader: R, mut writer: W) -> (Self, mpsc::UnboundedReceiver<Incoming>)
+    pub fn start<R, W>(reader: R, writer: W) -> (Self, mpsc::UnboundedReceiver<Incoming>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::start_with_output(reader, writer, Box::new(|_| {}))
+    }
+
+    /// [`start`](Self::start) that hands lines outside the protocol (an adapter's
+    /// own output on stdout, decoded) to `on_output`.
+    pub fn start_with_output<R, W>(
+        reader: R,
+        mut writer: W,
+        on_output: Box<dyn Fn(String) + Send + Sync>,
+    ) -> (Self, mpsc::UnboundedReceiver<Incoming>)
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -133,9 +147,14 @@ impl Connection {
         let reader_inner = inner.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
+            let mut noise = |line: &[u8]| {
+                let text = ide_jsonrpc::output::decode(line);
+                tracing::warn!("dap: output outside the protocol: {text}");
+                on_output(text);
+            };
             loop {
                 let msg = tokio::select! {
-                    msg = framing::read_message(&mut reader) => msg,
+                    msg = framing::read_message_or_noise(&mut reader, &mut noise) => msg,
                     _ = reader_inner.cancel.cancelled() => break,
                 };
                 match msg {

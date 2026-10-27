@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, Command};
 
 pub const PORT_PLACEHOLDER: &str = "${port}";
@@ -457,17 +457,19 @@ fn pump_lines<R: AsyncRead + Unpin + Send + 'static>(
     name: String,
     sink: Arc<parking_lot::Mutex<Vec<String>>>,
 ) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stream).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(target: "ide_dap::adapter", "[{name}] {line}");
-            let mut buf = sink.lock();
-            if buf.len() >= 40 {
-                buf.remove(0);
-            }
-            buf.push(line);
-        }
-    });
+    tokio::spawn(ide_jsonrpc::output::read_lines(stream, move |line| {
+        tracing::debug!(target: "ide_dap::adapter", "[{name}] {line}");
+        push_line(&sink, line);
+    }));
+}
+
+/// Appends to the recent-output buffer of an adapter (the last 40 lines).
+pub(crate) fn push_line(sink: &parking_lot::Mutex<Vec<String>>, line: String) {
+    let mut buf = sink.lock();
+    if buf.len() >= 40 {
+        buf.remove(0);
+    }
+    buf.push(line);
 }
 
 const LOOPBACK: &str = "127.0.0.1";

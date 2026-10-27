@@ -293,6 +293,7 @@ impl AppState {
                         &bundles,
                         lombok.jar(),
                     );
+                    ide_sdk::jdtls::launch_directly(cfg);
                 }
             }));
         }

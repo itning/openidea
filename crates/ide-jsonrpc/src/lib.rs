@@ -6,7 +6,10 @@
 //! * [`Peer`]: a JSON-RPC 2.0 endpoint with request/response correlation,
 //!   cancellation (`$/cancelRequest`) and handlers for server→client traffic.
 
+pub mod output;
+
 pub mod framing {
+    use crate::output::trim_line_end as trim_line;
     use std::io::{Error, ErrorKind};
     use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -21,6 +24,19 @@ pub mod framing {
     /// matched case-insensitively, unknown headers (e.g. `Content-Type`) are
     /// ignored, and both `\r\n` and bare `\n` line endings are accepted.
     pub async fn read_message<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+        read_message_or_noise(reader, &mut |line| {
+            tracing::warn!("jsonrpc: ignoring output outside the protocol: {}", crate::output::decode(line));
+        })
+        .await
+    }
+
+    /// [`read_message`] that hands lines which can't start a message header (a
+    /// launcher's or runtime's own output on stdout, in any encoding) to `on_noise`
+    /// and skips them, instead of failing on them.
+    pub async fn read_message_or_noise<R: AsyncBufRead + Unpin>(
+        reader: &mut R,
+        on_noise: &mut (dyn FnMut(&[u8]) + Send),
+    ) -> std::io::Result<Option<Vec<u8>>> {
         let mut content_length: Option<usize> = None;
         let mut saw_any = false;
         let mut line = Vec::with_capacity(64);
@@ -37,6 +53,11 @@ pub mod framing {
                 if n as u64 >= MAX_HEADER_LINE {
                     return Err(Error::new(ErrorKind::InvalidData, "header line too long"));
                 }
+                if !saw_any && header(&line).is_none() {
+                    // Output without a final newline, then EOF (`pause` waiting for a key).
+                    on_noise(trim_line(&line));
+                    return Ok(None);
+                }
                 return Err(Error::new(ErrorKind::UnexpectedEof, "EOF inside message header"));
             }
             let text = trim_line(&line);
@@ -50,12 +71,18 @@ pub mod framing {
                 // Tolerate stray blank lines between messages.
                 continue;
             }
-            saw_any = true;
-            let text = std::str::from_utf8(text).map_err(|_| Error::new(ErrorKind::InvalidData, "non-UTF-8 header"))?;
-            let Some((name, value)) = text.split_once(':') else {
-                return Err(Error::new(ErrorKind::InvalidData, format!("malformed header line: {text:?}")));
+            let Some((name, value)) = header(text) else {
+                if !saw_any {
+                    on_noise(text);
+                    continue;
+                }
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("malformed header line: {:?}", crate::output::decode(text)),
+                ));
             };
-            if name.trim().eq_ignore_ascii_case("content-length") {
+            saw_any = true;
+            if name.eq_ignore_ascii_case("content-length") {
                 let len: usize = value
                     .trim()
                     .parse()
@@ -72,12 +99,12 @@ pub mod framing {
         Ok(Some(body))
     }
 
-    fn trim_line(line: &[u8]) -> &[u8] {
-        let mut end = line.len();
-        while end > 0 && matches!(line[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        &line[..end]
+    /// `name: value` with a header-like name (a token, no spaces), else `None`.
+    fn header(line: &[u8]) -> Option<(&str, &str)> {
+        let text = std::str::from_utf8(trim_line(line)).ok()?;
+        let (name, value) = text.split_once(':')?;
+        let token = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        token.then_some((name, value))
     }
 
     /// Writes one framed message and flushes once.
@@ -126,7 +153,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -205,6 +232,8 @@ struct Inner {
     /// Fired by [`Peer::kill`]; stops tasks and kills the child.
     kill: CancellationToken,
     pid: Option<u32>,
+    /// Fired when the reader task has stopped (EOF, error or kill).
+    reader_done: CancellationToken,
 }
 
 impl Inner {
@@ -250,10 +279,20 @@ pub enum Framing {
 }
 
 impl Framing {
-    async fn read<R: tokio::io::AsyncBufRead + Unpin>(self, reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    async fn read<R: tokio::io::AsyncBufRead + Unpin>(
+        self,
+        reader: &mut R,
+        on_noise: &mut (dyn FnMut(&[u8]) + Send),
+    ) -> std::io::Result<Option<Vec<u8>>> {
         match self {
-            Framing::ContentLength => framing::read_message(reader).await,
-            Framing::Lines => framing::read_line_message(reader).await,
+            Framing::ContentLength => framing::read_message_or_noise(reader, on_noise).await,
+            Framing::Lines => loop {
+                let Some(line) = framing::read_line_message(reader).await? else { return Ok(None) };
+                match line.iter().find(|b| !b.is_ascii_whitespace()) {
+                    Some(b'{' | b'[') => return Ok(Some(line)),
+                    _ => on_noise(&line),
+                }
+            },
         }
     }
 
@@ -264,6 +303,9 @@ impl Framing {
         }
     }
 }
+
+/// How long a process that exited is given for its last output to be read.
+const OUTPUT_DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A connected JSON-RPC peer. Cloning shares the connection.
 #[derive(Clone)]
@@ -282,8 +324,9 @@ impl Drop for KillOnDrop {
 }
 
 impl Peer {
-    /// Spawns `command` and speaks JSON-RPC over its stdio. Stderr lines are
-    /// forwarded to `tracing` and to `on_stderr`.
+    /// Spawns `command` and speaks JSON-RPC over its stdio. Stderr lines, and
+    /// stdout lines that are not part of a message (a launcher's own output), are
+    /// decoded (see [`output::decode`]) and forwarded to `tracing` and to `on_stderr`.
     ///
     /// Must be called from within a Tokio runtime.
     pub fn spawn(
@@ -324,42 +367,44 @@ impl Peer {
         let stderr = child.stderr.take();
         let pid = child.id();
 
-        let peer = Self::start(stdout, stdin, handler, false, pid, framing);
+        let on_output: Arc<dyn Fn(String) + Send + Sync> = Arc::from(on_stderr);
+        let peer = Self::start(stdout, stdin, handler, false, pid, framing, Some(on_output.clone()));
 
-        if let Some(stderr) = stderr {
+        let stderr_task = stderr.map(|stderr| {
             let name = command.to_owned();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr);
-                let mut line = Vec::new();
-                loop {
-                    line.clear();
-                    match reader.read_until(b'\n', &mut line).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let text = String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_owned();
-                            tracing::debug!(target: "ide_jsonrpc::stderr", "[{name}] {text}");
-                            on_stderr(text);
-                        }
-                    }
-                }
-            });
-        }
+            tokio::spawn(output::read_lines(stderr, move |text| {
+                tracing::debug!(target: "ide_jsonrpc::stderr", "[{name}] {text}");
+                on_output(text);
+            }))
+        });
 
-        peer.supervise(child);
+        peer.supervise(child, stderr_task);
         Ok(peer)
     }
 
     /// Kills `child` when the connection is torn down; closes the connection when it exits.
-    fn supervise(&self, mut child: tokio::process::Child) {
+    /// After an exit of its own, the connection is reported closed only once what the
+    /// process wrote last (stderr, stray stdout) has been read, so a crash report has it.
+    fn supervise(&self, mut child: tokio::process::Child, stderr_task: Option<tokio::task::JoinHandle<()>>) {
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                status = child.wait() => status.ok(),
+            let (status, killed) = tokio::select! {
+                status = child.wait() => (status.ok(), false),
                 _ = inner.kill.cancelled() => {
                     let _ = child.start_kill();
-                    child.wait().await.ok()
+                    (child.wait().await.ok(), true)
                 }
             };
+            if !killed {
+                // Bounded: a grandchild may keep the pipes open.
+                let drained = async {
+                    if let Some(task) = stderr_task {
+                        let _ = task.await;
+                    }
+                    inner.reader_done.cancelled().await;
+                };
+                let _ = tokio::time::timeout(OUTPUT_DRAIN, drained).await;
+            }
             inner.mark_closed(status.and_then(|s| s.code()));
         });
     }
@@ -373,7 +418,7 @@ impl Peer {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        Self::start(reader, writer, handler, true, None, Framing::ContentLength)
+        Self::start(reader, writer, handler, true, None, Framing::ContentLength, None)
     }
 
     /// [`connect`](Self::connect) with the given wire framing.
@@ -382,7 +427,7 @@ impl Peer {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        Self::start(reader, writer, handler, true, None, framing)
+        Self::start(reader, writer, handler, true, None, framing, None)
     }
 
     /// [`Peer::connect`] over streams served by `child` (a server reached over a socket
@@ -399,8 +444,8 @@ impl Peer {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let peer = Self::start(reader, writer, handler, true, child.id(), Framing::ContentLength);
-        peer.supervise(child);
+        let peer = Self::start(reader, writer, handler, true, child.id(), Framing::ContentLength, None);
+        peer.supervise(child, None);
         peer
     }
 
@@ -411,6 +456,7 @@ impl Peer {
         close_on_eof: bool,
         pid: Option<u32>,
         framing: Framing,
+        on_noise: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -426,6 +472,7 @@ impl Peer {
             closed,
             kill: CancellationToken::new(),
             pid,
+            reader_done: CancellationToken::new(),
         });
 
         // Writer: a single task drains the queue so messages never interleave.
@@ -476,20 +523,39 @@ impl Peer {
             let inner = inner.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(reader);
+                let seen_message = AtomicBool::new(false);
+                let mut noise = |line: &[u8]| {
+                    let text = output::decode(line);
+                    if seen_message.load(Ordering::Relaxed) {
+                        tracing::debug!("jsonrpc: output outside the protocol: {text}");
+                    } else {
+                        tracing::warn!("jsonrpc: output before the first message: {text}");
+                    }
+                    if let Some(f) = &on_noise {
+                        f(text);
+                    }
+                };
                 loop {
                     let msg = tokio::select! {
-                        msg = framing.read(&mut reader) => msg,
+                        msg = framing.read(&mut reader, &mut noise) => msg,
                         _ = inner.kill.cancelled() => break,
                     };
                     match msg {
-                        Ok(Some(body)) => dispatch(&inner, &handler, &notif_tx, &body),
+                        Ok(Some(body)) => {
+                            seen_message.store(true, Ordering::Relaxed);
+                            dispatch(&inner, &handler, &notif_tx, &body);
+                        }
                         Ok(None) => break,
                         Err(e) => {
                             tracing::warn!("jsonrpc read failed: {e}");
+                            if let Some(f) = &on_noise {
+                                f(format!("invalid protocol output: {e}"));
+                            }
                             break;
                         }
                     }
                 }
+                inner.reader_done.cancel();
                 inner.close_transport();
                 if close_on_eof || inner.kill.is_cancelled() {
                     inner.mark_closed(None);

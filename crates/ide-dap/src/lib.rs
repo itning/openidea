@@ -681,7 +681,10 @@ impl DebugManager {
         }
         let io = self.launcher.launch(spec.clone(), reuse_port).await?;
         let stderr = io.stderr.clone();
-        let (conn, incoming) = Connection::start(io.reader, io.writer);
+        let (conn, incoming) = {
+            let stderr = stderr.clone();
+            Connection::start_with_output(io.reader, io.writer, Box::new(move |line| adapter::push_line(&stderr, line)))
+        };
         let session =
             Arc::new(Session::new(id, owner, name, adapter_name, parent, request, conn, spec, io.port, io.child));
         self.sessions.lock().insert(id, session.clone());

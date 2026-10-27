@@ -10,6 +10,7 @@ mod discover;
 mod exec;
 pub mod godot;
 pub mod java;
+pub mod jdtls;
 pub mod libraries;
 pub mod locate;
 pub mod lombok;

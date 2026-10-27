@@ -44,6 +44,46 @@ mod framing_tests {
         assert!(read_all(long.as_bytes()).await.is_err(), "header too long");
     }
 
+    async fn read_with_noise(input: &[u8]) -> (std::io::Result<Vec<Vec<u8>>>, Vec<String>) {
+        let mut reader = BufReader::new(input);
+        let mut noise = Vec::new();
+        let mut out = Vec::new();
+        let result = loop {
+            match read_message_or_noise(&mut reader, &mut |l| noise.push(crate::output::decode(l))).await {
+                Ok(Some(msg)) => out.push(msg),
+                Ok(None) => break Ok(out),
+                Err(e) => break Err(e),
+            }
+        };
+        (result, noise)
+    }
+
+    #[tokio::test]
+    async fn output_between_messages_is_reported_and_skipped() {
+        let input = b"OpenJDK 64-Bit Server VM warning: Sharing is only supported\r\n\xc7\xeb\xb0\xb4 \xff\n\
+            Content-Length: 2\r\n\r\n{}Picked up JAVA_TOOL_OPTIONS: -Dx\nContent-Length: 4\r\n\r\nnull";
+        let (msgs, noise) = read_with_noise(input).await;
+        assert_eq!(msgs.unwrap(), vec![b"{}".to_vec(), b"null".to_vec()]);
+        assert_eq!(noise.len(), 3, "{noise:?}");
+        assert_eq!(noise[0], "OpenJDK 64-Bit Server VM warning: Sharing is only supported");
+        assert_eq!(noise[2], "Picked up JAVA_TOOL_OPTIONS: -Dx");
+    }
+
+    #[tokio::test]
+    async fn unterminated_output_then_eof_is_reported() {
+        // `pause` prints its prompt without a newline and the process is gone.
+        let (msgs, noise) = read_with_noise(b"Press any key to continue . . . ").await;
+        assert!(msgs.unwrap().is_empty());
+        assert_eq!(noise, ["Press any key to continue . . . "]);
+    }
+
+    #[tokio::test]
+    async fn garbage_inside_a_header_is_still_an_error() {
+        let (msgs, _) = read_with_noise(b"Content-Length: 2\r\nnot a header\r\n\r\n{}").await;
+        let e = msgs.unwrap_err();
+        assert!(e.to_string().contains("not a header"), "{e}");
+    }
+
     #[tokio::test]
     async fn handles_partial_reads() {
         let (mut client, server) = tokio::io::duplex(4);
@@ -350,4 +390,31 @@ async fn kill_terminates_process() {
             .unwrap();
     peer.kill();
     tokio::time::timeout(Duration::from_secs(5), peer.closed()).await.unwrap();
+}
+
+/// A launcher that prints in the system code page and exits before speaking the
+/// protocol: `jdtls.bat` on a Chinese Windows when its Python step fails, then
+/// `pause` prints `请按任意键继续. . .` in GBK on stdout.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn output_before_the_handshake_is_reported_not_dropped() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    let script = r"printf 'python: not found\n' >&2; printf '\307\353\260\264\310\316\322\342\274\374\274\314\320\370. . .\r\n'; exit 1";
+    let peer = Peer::spawn(
+        "sh",
+        &["-c".into(), script.into()],
+        &std::env::temp_dir(),
+        &[],
+        Arc::new(NoopHandler),
+        Box::new(move |l| sink.lock().push(l)),
+    )
+    .unwrap();
+    let init = peer.request::<_, Value>("initialize", json!({}), None).await;
+    assert!(matches!(init, Err(RpcError::Closed)), "{init:?}");
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), peer.closed()).await.unwrap(), Some(1));
+    // Everything the process wrote is in by the time the close is reported.
+    let lines = lines.lock().clone();
+    assert!(lines.iter().any(|l| l == "python: not found"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.ends_with(". . .") && l.len() > 6), "{lines:?}");
 }

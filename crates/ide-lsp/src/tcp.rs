@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::AsyncRead;
 
 pub(crate) const PORT_PLACEHOLDER: &str = "${port}";
 pub(crate) const ROOT_PLACEHOLDER: &str = "${root}";
@@ -157,12 +157,7 @@ pub(crate) fn connect_or_start(
 }
 
 fn pump_lines<R: AsyncRead + Unpin + Send + 'static>(stream: R, on_line: Arc<dyn Fn(String) + Send + Sync>) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stream).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            on_line(line);
-        }
-    });
+    tokio::spawn(ide_jsonrpc::output::read_lines(stream, move |line| on_line(line)));
 }
 
 #[cfg(test)]

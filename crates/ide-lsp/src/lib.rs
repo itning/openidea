@@ -406,6 +406,10 @@ impl LspManager {
             }
             Err(e) => {
                 tracing::warn!("{}: initialize failed: {e}", server.name);
+                if matches!(e, RpcError::Closed) {
+                    // The server is exiting: let it, so the crash report has its exit code and last output.
+                    let _ = tokio::time::timeout(Duration::from_secs(3), peer.closed()).await;
+                }
                 peer.kill();
                 // Treated like a crash so transient failures retry with backoff.
                 self.spawn_supervisor(server, generation, peer);
