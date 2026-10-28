@@ -181,6 +181,9 @@ function LogView() {
   // remembered refs, else the current branch) and load the log with it.
   useEffect(() => {
     if (!branchesLoaded) return;
+    // The refs the log is loaded with, so the first checkout or commit after this reloads it.
+    const { branch, branches } = useVcs.getState();
+    lastRefs.current = refsSignature(branch, branches);
     const settled = initLogBranchFilter();
     const { commits, loading } = useGitLog.getState();
     if (settled || (!commits.length && !loading)) void reloadLog();
