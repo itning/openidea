@@ -1,23 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Branch, BranchInfo } from "@/bindings";
-
-const ipc = vi.hoisted(() => ({
-  loaded: {} as Record<string, string[]>,
-  save: vi.fn(),
-}));
+import type { Branch } from "@/bindings";
 
 vi.mock("@/platform/ipc", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/platform/ipc")>();
   return {
     ...real,
-    isTauri: () => true,
     commands: {
       ...real.commands,
-      vcsLogBranchesLoad: () => Promise.resolve({ status: "ok", data: ipc.loaded }),
-      vcsLogBranchesSave: (repo: string, branches: string[]) => {
-        ipc.save(repo, branches);
-        return Promise.resolve({ status: "ok", data: null });
-      },
       vcsLog: () => Promise.resolve({ status: "ok", data: [] }),
       vcsConfigGet: () => Promise.resolve({ status: "ok", data: null }),
     },
@@ -27,8 +16,7 @@ vi.mock("@/platform/ipc", async (importOriginal) => {
 import {
   emptyFilters,
   initLogBranchFilter,
-  loadLogBranchMemory,
-  repoWorkspaceKey,
+  rememberedLogBranches,
   resolveLogBranches,
   setLogBranches,
   useGitLog,
@@ -47,159 +35,79 @@ const b = (name: string, opts: Partial<Branch> = {}): Branch => ({
   ...opts,
 });
 
-const head: BranchInfo = {
-  head: "main",
-  headCommit: "1",
-  upstream: null,
-  ahead: 0,
-  behind: 0,
-  operation: null,
-};
+const remember = (repo: string, branches: string[]) =>
+  localStorage.setItem(`openidea.vcs.logBranches:${repo}`, JSON.stringify(branches));
 
-/** A project and its repository, so every test gets its own workspace memory. */
+/** A project and its selected repository with the given branches. */
 function project(root: string, repo = root, branches: readonly Branch[] = [b("main", { current: true })]) {
-  useVcs.setState({
-    root,
-    roots: [repo],
-    repo,
-    branches: [...branches],
-    branchesLoaded: true,
-    branch: { ...head, head: branches.find((x) => x.current)?.name ?? null },
-  });
+  useVcs.setState({ root, roots: [repo], repo, branches: [...branches], branchesLoaded: true });
   useGitLog.setState({ filters: emptyFilters(), branchScope: null, shownLog: "log", commits: [] });
 }
 
-beforeEach(() => {
-  ipc.loaded = {};
-  ipc.save.mockReset();
-});
+beforeEach(() => localStorage.clear());
 
 describe("resolveLogBranches", () => {
-  it("defaults to the current branch when nothing was remembered", () => {
-    expect(resolveLogBranches(undefined, ["main", "feature"], "main")).toEqual(["main"]);
+  it("defaults to HEAD (the current branch) when nothing was remembered", () => {
+    expect(resolveLogBranches(undefined, ["main", "feature"])).toEqual(["HEAD"]);
   });
 
-  it("defaults to HEAD when HEAD is detached", () => {
-    expect(resolveLogBranches(undefined, ["main"], null)).toEqual(["HEAD"]);
+  it("keeps a remembered local or remote branch", () => {
+    expect(resolveLogBranches(["feature"], ["main", "feature"])).toEqual(["feature"]);
+    expect(resolveLogBranches(["origin/es"], ["main", "origin/es"])).toEqual(["origin/es"]);
   });
 
-  it("keeps a remembered local branch", () => {
-    expect(resolveLogBranches(["feature"], ["main", "feature"], "main")).toEqual(["feature"]);
-  });
-
-  it("keeps a remembered remote branch", () => {
-    expect(resolveLogBranches(["origin/elasticsearch"], ["main", "origin/elasticsearch"], "main")).toEqual([
-      "origin/elasticsearch",
-    ]);
-  });
-
-  it("falls back to the current branch when the remembered one is gone", () => {
-    expect(resolveLogBranches(["deleted"], ["main", "feature"], "main")).toEqual(["main"]);
+  it("falls back to HEAD when every remembered branch is gone", () => {
+    expect(resolveLogBranches(["deleted"], ["main"])).toEqual(["HEAD"]);
   });
 
   it("keeps the remembered branches that still exist", () => {
-    expect(resolveLogBranches(["deleted", "feature"], ["main", "feature"], "main")).toEqual(["feature"]);
+    expect(resolveLogBranches(["deleted", "feature"], ["main", "feature"])).toEqual(["feature"]);
   });
 
-  it("keeps an empty list as all branches", () => {
-    expect(resolveLogBranches([], ["main", "feature"], "main")).toEqual([]);
-  });
-
-  it("keeps HEAD", () => {
-    expect(resolveLogBranches(["HEAD"], ["main"], "main")).toEqual(["HEAD"]);
-  });
-});
-
-describe("repoWorkspaceKey", () => {
-  it("names the project's own repository $PROJECT_DIR$", () => {
-    expect(repoWorkspaceKey("/work/shop", "/work/shop")).toBe("$PROJECT_DIR$");
-  });
-
-  it("names a nested repository by its path below the project", () => {
-    expect(repoWorkspaceKey("/work/shop", "/work/shop/backend")).toBe("$PROJECT_DIR$/backend");
-  });
-
-  it("falls back to the absolute path for a repository outside the project", () => {
-    expect(repoWorkspaceKey("/work/shop", "/elsewhere/repo")).toBe("/elsewhere/repo");
+  it("keeps an empty list as all branches, and HEAD", () => {
+    expect(resolveLogBranches([], ["main"])).toEqual([]);
+    expect(resolveLogBranches(["HEAD"], ["main"])).toEqual(["HEAD"]);
   });
 });
 
 describe("Git Log branch filter memory", () => {
-  it("selects the current branch on first open", async () => {
+  it("shows the current branch on first open", () => {
     project("/mem-first");
-    await loadLogBranchMemory();
-
     expect(initLogBranchFilter()).toBe(true);
-    expect(useGitLog.getState().filters.branches).toEqual(["main"]);
-    expect(useGitLog.getState().branchScope).toBe("$PROJECT_DIR$");
+    expect(useGitLog.getState().filters.branches).toEqual(["HEAD"]);
+    expect(initLogBranchFilter()).toBe(false);
   });
 
-  it("uses the branch list's current flag before the branch info arrives", async () => {
-    useVcs.setState({
-      root: "/mem-race",
-      roots: ["/mem-race"],
-      repo: "/mem-race",
-      branches: [b("main", { current: true })],
-      branchesLoaded: true,
-      branch: null,
-    });
-    useGitLog.setState({ filters: emptyFilters(), branchScope: null, shownLog: "log", commits: [] });
-    await loadLogBranchMemory();
-
+  it("restores the remembered branch, dropping a deleted one", () => {
+    remember("/mem-restore", ["origin/es", "deleted"]);
+    project("/mem-restore", "/mem-restore", [b("main", { current: true }), b("origin/es", { remote: true })]);
     initLogBranchFilter();
-    expect(useGitLog.getState().filters.branches).toEqual(["main"]);
+    expect(useGitLog.getState().filters.branches).toEqual(["origin/es"]);
   });
 
-  it("restores the remembered remote branch", async () => {
-    ipc.loaded = { $PROJECT_DIR$: ["origin/elasticsearch"] };
-    project("/mem-restore", "/mem-restore", [
-      b("main", { current: true }),
-      b("origin/elasticsearch", { remote: true }),
-    ]);
-    await loadLogBranchMemory();
-
-    initLogBranchFilter();
-    expect(useGitLog.getState().filters.branches).toEqual(["origin/elasticsearch"]);
-  });
-
-  it("falls back to the current branch when the remembered one was deleted", async () => {
-    ipc.loaded = { $PROJECT_DIR$: ["deleted"] };
-    project("/mem-deleted");
-    await loadLogBranchMemory();
-
-    initLogBranchFilter();
-    expect(useGitLog.getState().filters.branches).toEqual(["main"]);
-  });
-
-  it("remembers a manually selected branch for the repository", async () => {
+  it("remembers a choice in the main Log, including all branches", () => {
     project("/mem-save");
-    await loadLogBranchMemory();
-
-    setLogBranches(["feature"]);
-
-    expect(useGitLog.getState().filters.branches).toEqual(["feature"]);
-    await vi.waitFor(() => expect(ipc.save).toHaveBeenCalledWith("$PROJECT_DIR$", ["feature"]));
-  });
-
-  it("remembers clearing the filter as all branches", async () => {
-    ipc.loaded = { $PROJECT_DIR$: ["feature"] };
-    project("/mem-clear");
-    await loadLogBranchMemory();
     initLogBranchFilter();
-
+    setLogBranches(["feature"]);
+    expect(useGitLog.getState().filters.branches).toEqual(["feature"]);
+    expect(rememberedLogBranches("/mem-save")).toEqual(["feature"]);
     setLogBranches([]);
-
-    expect(useGitLog.getState().filters.branches).toEqual([]);
-    await vi.waitFor(() => expect(ipc.save).toHaveBeenCalledWith("$PROJECT_DIR$", []));
+    expect(rememberedLogBranches("/mem-save")).toEqual([]);
   });
 
-  it("keeps a separate selection for every repository", async () => {
-    ipc.loaded = { $PROJECT_DIR$: ["main"], "$PROJECT_DIR$/backend": ["dev"] };
-    project("/mem-multi", "/mem-multi/backend", [b("dev", { current: true }), b("main")]);
-    await loadLogBranchMemory();
+  it("does not remember a choice in another log tab", () => {
+    project("/mem-tab");
+    useGitLog.setState({ shownLog: "tab-1" });
+    setLogBranches(["feature"]);
+    expect(rememberedLogBranches("/mem-tab")).toBeUndefined();
+  });
 
+  it("keeps a separate choice for every repository", () => {
+    remember("/mem-multi", ["main"]);
+    remember("/mem-multi/backend", ["dev"]);
+    project("/mem-multi", "/mem-multi/backend", [b("dev", { current: true }), b("main")]);
     initLogBranchFilter();
     expect(useGitLog.getState().filters.branches).toEqual(["dev"]);
-    expect(useGitLog.getState().branchScope).toBe("$PROJECT_DIR$/backend");
+    expect(useGitLog.getState().branchScope).toBe("/mem-multi/backend");
   });
 });

@@ -1,11 +1,10 @@
 /** Git log tool window state: filters, paged commits, graph, selection. */
 import { create } from "zustand";
 import type { Branch, BranchInfo, Commit } from "@/bindings";
-import { call, commands, isTauri } from "@/platform/ipc";
+import { call, commands } from "@/platform/ipc";
 import { workflowSettings } from "@/platform/workflowSettings";
 import { collapseLinear, computeGraph, emptyGraphState, type GraphRow, type GraphState } from "./graph";
 import { logOptions, setLogOptions, type LogOptions } from "./logOptions";
-import { stripSlash } from "./model";
 import { clearConsole, errorMessage } from "./ops";
 import { currentRepo, currentRepoRoot, repoOf, selectRepo, useVcs } from "./store";
 
@@ -149,69 +148,35 @@ const initialLog = (): Omit<LogState, "generation"> => ({
 export const useGitLog = create<LogState>(() => ({ ...initialLog(), generation: 0 }));
 
 /**
- * How IDEA names a repository in `workspace.xml`: `$PROJECT_DIR$` for the
- * project's own repository, `$PROJECT_DIR$/sub` for a nested one.
+ * The refs the log shows: the remembered ones that still exist, else `HEAD` (the
+ * current branch, followed across checkouts). An empty list is a real choice: all branches.
  */
-export function repoWorkspaceKey(projectRoot: string | null, repoRoot: string | null): string {
-  const root = stripSlash(projectRoot ?? "");
-  const repo = stripSlash(repoRoot ?? "");
-  if (!repo) return "$PROJECT_DIR$";
-  if (!root || repo === root) return "$PROJECT_DIR$";
-  return repo.startsWith(`${root}/`) ? `$PROJECT_DIR$/${repo.slice(root.length + 1)}` : repo;
-}
-
-/**
- * The refs the log shows: the remembered ones that still exist, else the current
- * branch (`HEAD` when detached). An empty list is a real choice: all branches.
- */
-export function resolveLogBranches(
-  remembered: readonly string[] | undefined,
-  branches: readonly string[],
-  current: string | null,
-): string[] {
-  if (remembered === undefined) return [current ?? "HEAD"];
+export function resolveLogBranches(remembered: readonly string[] | undefined, branches: readonly string[]): string[] {
+  if (remembered === undefined) return ["HEAD"];
   if (!remembered.length) return [];
   const valid = remembered.filter((ref) => ref === "HEAD" || branches.includes(ref));
-  return valid.length ? valid : [current ?? "HEAD"];
+  return valid.length ? valid : ["HEAD"];
 }
 
-interface LogBranchMemory {
-  root: string | null;
-  filters: Record<string, string[]>;
-  loaded: Promise<void>;
-}
+const branchMemoryKey = (repo: string) => `openidea.vcs.logBranches:${repo}`;
 
-/** The branch filters remembered in `.openidea/workspace.xml`, cached per project. */
-let branchMemory: LogBranchMemory | null = null;
-
-function branchMemoryFor(root: string | null): LogBranchMemory {
-  if (branchMemory?.root === root) return branchMemory;
-  const entry: LogBranchMemory = { root, filters: {}, loaded: Promise.resolve() };
-  branchMemory = entry;
-  if (root && isTauri()) {
-    entry.loaded = call(commands.vcsLogBranchesLoad()).then(
-      (filters) => {
-        // A choice made while the file was loading wins over the file.
-        if (branchMemory === entry) entry.filters = { ...filters, ...entry.filters };
-      },
-      () => undefined,
-    );
+/** The main Log's branch filter last chosen for `repo`; undefined when none was. */
+export function rememberedLogBranches(repo: string): string[] | undefined {
+  try {
+    const raw = localStorage.getItem(branchMemoryKey(repo));
+    const v: unknown = raw ? JSON.parse(raw) : undefined;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+  } catch {
+    return undefined;
   }
-  return entry;
-}
-
-/** Reads the remembered filters once per project; await before the first log load. */
-export function loadLogBranchMemory(): Promise<void> {
-  return branchMemoryFor(useVcs.getState().root).loaded;
 }
 
 function rememberLogBranches(repo: string, branches: readonly string[]) {
-  const entry = branchMemoryFor(useVcs.getState().root);
-  entry.filters = { ...entry.filters, [repo]: [...branches] };
-  if (!isTauri()) return;
-  void entry.loaded.then(() => {
-    void call(commands.vcsLogBranchesSave(repo, [...branches])).catch(() => undefined);
-  });
+  try {
+    localStorage.setItem(branchMemoryKey(repo), JSON.stringify(branches));
+  } catch {
+    // Storage unavailable: the choice lasts for the session only.
+  }
 }
 
 /**
@@ -220,30 +185,26 @@ function rememberLogBranches(repo: string, branches: readonly string[]) {
  */
 export function initLogBranchFilter(): boolean {
   const s = useGitLog.getState();
-  if (s.shownLog !== "log") return false;
-  const projectRoot = useVcs.getState().root;
-  const scope = repoWorkspaceKey(projectRoot, currentRepoRoot());
-  if (s.branchScope === scope) return false;
-  const { branches, branch } = useVcs.getState();
-  const names = branches.filter((b) => !b.name.endsWith("/HEAD")).map((b) => b.name);
-  // The branch list arrives before `branch` info sometimes; its `current` flag is enough.
-  const current = branches.find((b) => b.current)?.name ?? branch?.head ?? null;
-  const remembered = branchMemoryFor(projectRoot).filters[scope];
-  const next = resolveLogBranches(remembered, names, current);
-  useGitLog.setState({ filters: { ...s.filters, branches: next }, branchScope: scope });
+  const repo = currentRepoRoot();
+  if (s.shownLog !== "log" || !repo || s.branchScope === repo) return false;
+  const names = useVcs
+    .getState()
+    .branches.filter((b) => !b.name.endsWith("/HEAD"))
+    .map((b) => b.name);
+  const next = resolveLogBranches(rememberedLogBranches(repo), names);
+  useGitLog.setState({ filters: { ...s.filters, branches: next }, branchScope: repo });
   return true;
 }
 
-/** The Branch filter's setter: a user's choice is remembered for the repository. */
+/** The Branch filter's setter: a choice in the main Log is remembered for the repository. */
 export function setLogBranches(branches: readonly string[]) {
   const s = useGitLog.getState();
-  const main = s.shownLog === "log";
-  const scope = main ? repoWorkspaceKey(useVcs.getState().root, currentRepoRoot()) : null;
+  const repo = s.shownLog === "log" ? currentRepoRoot() : null;
   useGitLog.setState({
     filters: { ...s.filters, branches: [...branches] },
-    ...(scope ? { branchScope: scope } : {}),
+    ...(repo ? { branchScope: repo } : {}),
   });
-  if (scope) rememberLogBranches(scope, branches);
+  if (repo) rememberLogBranches(repo, branches);
   void reloadLog();
 }
 

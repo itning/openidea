@@ -455,8 +455,6 @@ export const commands = {
 	vcsShelfPatch: (id: string) => typedError<string, IdeError>(__TAURI_INVOKE("vcs_shelf_patch", { id })),
 	vcsChangelistsLoad: () => typedError<ChangelistState, IdeError>(__TAURI_INVOKE("vcs_changelists_load")),
 	vcsChangelistsSave: (changelists: ChangelistState) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_changelists_save", { changelists })),
-	vcsLogBranchesLoad: () => typedError<{ [key in string]: string[] }, IdeError>(__TAURI_INVOKE("vcs_log_branches_load")),
-	vcsLogBranchesSave: (repo: string, branches: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_log_branches_save", { repo, branches })),
 	/**  Create Patch › Save to file. */
 	vcsWritePatch: (path: string, patch: string) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_write_patch", { path, patch })),
 	termSpawn: (options: TerminalOptions, onOutput: Channel<string>) => typedError<TerminalInfo, IdeError>(__TAURI_INVOKE("term_spawn", { options, onOutput })),

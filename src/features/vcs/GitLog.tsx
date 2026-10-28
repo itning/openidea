@@ -42,7 +42,6 @@ import {
   goToParent,
   initLogBranchFilter,
   isMine,
-  loadLogBranchMemory,
   loadMore,
   ME,
   dateRangeLabel,
@@ -179,19 +178,12 @@ function LogView() {
   }, [root, repo]);
 
   // Once the repository's branches are known, settle the branch filter (the
-  // remembered branch, else the current one) and load the log with it.
+  // remembered refs, else the current branch) and load the log with it.
   useEffect(() => {
     if (!branchesLoaded) return;
-    let live = true;
-    void loadLogBranchMemory().then(() => {
-      if (!live) return;
-      const settled = initLogBranchFilter();
-      const { commits, loading } = useGitLog.getState();
-      if (settled || (!commits.length && !loading)) void reloadLog();
-    });
-    return () => {
-      live = false;
-    };
+    const settled = initLogBranchFilter();
+    const { commits, loading } = useGitLog.getState();
+    if (settled || (!commits.length && !loading)) void reloadLog();
   }, [root, repo, branchesLoaded]);
 
   // HEAD or a branch tip moved (commit, undo, reset, rebase, fetch…): reload (keeps the selection).

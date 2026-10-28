@@ -239,8 +239,6 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         vcs::vcs_shelf_patch,
         vcs::vcs_changelists_load,
         vcs::vcs_changelists_save,
-        vcs::vcs_log_branches_load,
-        vcs::vcs_log_branches_save,
         vcs::vcs_write_patch,
         term::term_spawn,
         term::term_write,

@@ -597,26 +597,6 @@ pub fn vcs_changelists_save(window: Window, state: State<'_, AppState>, changeli
     ide_host::ops::vcs::vcs_changelists_save(&state.host, window.label(), changelists)
 }
 
-#[tauri::command]
-#[specta::specta]
-pub fn vcs_log_branches_load(
-    window: Window,
-    state: State<'_, AppState>,
-) -> IdeResult<std::collections::BTreeMap<String, Vec<String>>> {
-    ide_host::ops::vcs::vcs_log_branches_load(&state.host, window.label())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn vcs_log_branches_save(
-    window: Window,
-    state: State<'_, AppState>,
-    repo: String,
-    branches: Vec<String>,
-) -> IdeResult<()> {
-    ide_host::ops::vcs::vcs_log_branches_save(&state.host, window.label(), repo, branches)
-}
-
 /// Create Patch › Save to file.
 #[tauri::command]
 #[specta::specta]
