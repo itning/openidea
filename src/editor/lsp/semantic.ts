@@ -197,7 +197,11 @@ const semanticPlugin = ViewPlugin.fromClass(
 
 export function semanticExtension(): Extension {
   // Higher-precedence decoration sources create the *inner* DOM nodes, so this
-  // must outrank Lezer's highlighter (default precedence) for semantic colours
-  // to win; they only set colour / style, never backgrounds.
-  return [semanticField, semanticPlugin, Prec.high(EditorView.decorations.from(semanticField))];
+  // must outrank Lezer's highlighter for semantic colours to win; they only set
+  // colour / style, never backgrounds. `Prec.highest`, not `Prec.high`: the
+  // highlighter (`treeHighlighter` in @codemirror/language) is itself
+  // `Prec.high`, and at equal precedence the later source ends up outside —
+  // its inner span then re-set the colour (a field's `variableName` grey hid
+  // `cm-sem-property`).
+  return [semanticField, semanticPlugin, Prec.highest(EditorView.decorations.from(semanticField))];
 }
