@@ -15,6 +15,7 @@ gix = { workspace = true, features = ["sha1", "status", "blob-diff", "revision",
 tracing.workspace = true
 which = "8"
 regex-lite = "0.1"
+quick-xml = "0.42"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

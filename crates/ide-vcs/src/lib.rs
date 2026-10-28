@@ -441,6 +441,7 @@ pub mod changelists;
 mod cli;
 mod diff;
 mod history;
+pub mod log_state;
 mod manage;
 mod ops;
 mod patch;

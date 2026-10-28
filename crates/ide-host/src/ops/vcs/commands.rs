@@ -151,7 +151,7 @@ pub enum PatchSource {
 
 // ---- shelf (`.openidea/shelf`) and change lists (`.openidea/changelists.json`) ----
 
-const PRIVATE_ENTRIES: [&str; 2] = ["/shelf/", "/changelists.json"];
+const PRIVATE_ENTRIES: [&str; 3] = ["/shelf/", "/changelists.json", "/workspace.xml"];
 
 fn shelf_dir(root: &Path) -> PathBuf {
     ide_core::project_dir::path(root, "shelf")
@@ -757,6 +757,19 @@ pub fn vcs_changelists_save(host: &Host, window: &str, changelists: ChangelistSt
     ide_vcs::changelists::save(&ide_core::project_dir::path(&project.root, "changelists.json"), &changelists)
 }
 
+/// The Git Log branch filters remembered in `.openidea/workspace.xml`, by repository key.
+pub fn vcs_log_branches_load(host: &Host, window: &str) -> IdeResult<std::collections::BTreeMap<String, Vec<String>>> {
+    let project = host.project(window)?;
+    ide_vcs::log_state::load_branch_filters(&project.root)
+}
+
+/// Remembers one repository's Git Log branch filter in `.openidea/workspace.xml`.
+pub fn vcs_log_branches_save(host: &Host, window: &str, repo: String, branches: Vec<String>) -> IdeResult<()> {
+    let project = host.project(window)?;
+    keep_private(&project.root);
+    ide_vcs::log_state::save_branch_filter(&project.root, &repo, &branches)
+}
+
 /// Create Patch › Save to file.
 pub async fn vcs_write_patch(_host: &Host, _window: &str, path: PathBuf, patch: String) -> IdeResult<()> {
     blocking(move || {
@@ -912,6 +925,10 @@ pub(crate) fn register(d: &mut Dispatcher) {
     d.add("vcs_shelf_patch", |c| async move { vcs_shelf_patch(&c.host, &c.window, c.arg("id")?) });
     d.add("vcs_changelists_load", |c| async move { vcs_changelists_load(&c.host, &c.window) });
     d.add("vcs_changelists_save", |c| async move { vcs_changelists_save(&c.host, &c.window, c.arg("changelists")?) });
+    d.add("vcs_log_branches_load", |c| async move { vcs_log_branches_load(&c.host, &c.window) });
+    d.add("vcs_log_branches_save", |c| async move {
+        vcs_log_branches_save(&c.host, &c.window, c.arg("repo")?, c.arg("branches")?)
+    });
     d.add(
         "vcs_write_patch",
         |c| async move { vcs_write_patch(&c.host, &c.window, c.arg("path")?, c.arg("patch")?).await },
