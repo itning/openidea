@@ -102,6 +102,9 @@ export function isTextInput(input: EditorInput): input is EditorInput & { path: 
 
 export const useTabs = create<TabsState>(() => initialTabsState());
 
+/** Session key of the LightEdit window: its tabs reopen the next time a window switches to LightEdit. */
+export const LIGHT_EDIT_SESSION = "<lightEdit>";
+
 export interface EditorStatus {
   path: string;
   doc: number;
@@ -179,7 +182,7 @@ export class EditorController implements SlotHost {
   activeSlot: EditorSlot | null = null;
   private statusScheduled = false;
   private disposers: Array<() => void> = [];
-  /** Project root whose editor session is being tracked (null while switching). */
+  /** Project root (or {@link LIGHT_EDIT_SESSION}) whose editor session is being tracked (null while switching). */
   private sessionRoot: string | null = null;
   private sessionTimer: ReturnType<typeof setTimeout> | undefined;
   /** Restored caret / scroll per path, applied when the file's first slot is created. */
@@ -237,6 +240,7 @@ export class EditorController implements SlotHost {
           this.nav.clear();
           this.edits.clear();
           if (root) this.restoreSession(root);
+          else if (s.lightEdit) this.restoreSession(LIGHT_EDIT_SESSION);
         }
       }),
     );

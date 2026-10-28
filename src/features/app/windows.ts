@@ -296,6 +296,25 @@ export function windowActions(): Action[] {
   ];
 }
 
+async function closeThisWindow(): Promise<void> {
+  if (!isTauri()) return;
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().close();
+}
+
+/**
+ * LightEdit: closing its last editor tab closes the window (through the close guard,
+ * so the last window shows the Welcome screen instead).
+ */
+export function installLightEditAutoClose(closeWindow: () => Promise<void> = closeThisWindow): () => void {
+  const editor = maybeEditorService();
+  const off = editor?.onActiveInputChange?.((input) => {
+    if (input || !useProject.getState().lightEdit || editor?.openTabs?.().length) return;
+    void closeWindow().catch((e) => console.warn("could not close the window", e));
+  });
+  return () => off?.();
+}
+
 export function installLaunchHandling(): () => void {
   if (!isTauri()) return () => {};
   let disposed = false;
