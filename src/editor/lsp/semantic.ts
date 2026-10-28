@@ -96,12 +96,15 @@ export function semanticRanges(doc: Text, tokens: SemanticTokens, rainbow = fals
     const names: string[] = [];
     for (let b = 0; b < tokenModifiers.length; b++) if (mods & (1 << b)) names.push(tokenModifiers[b]!);
     const classes: string[] = [];
-    let base = TYPE_CLASS[type];
+    let base = Object.hasOwn(TYPE_CLASS, type) ? TYPE_CLASS[type] : undefined;
+    // jdtls marks constructors as a class with a `constructor` modifier; IDEA colours them as methods.
+    if (names.includes("constructor")) base = "function";
     const constant =
       names.includes("constant") || (type === "variable" && names.includes("readonly") && names.includes("static"));
     if (constant && (type === "variable" || type === "property")) base = "constant";
     if (base && base !== "variable") classes.push(`cm-sem-${base}`);
-    for (const n of names) if (MODIFIER_CLASS[n]) classes.push(`cm-sem-${MODIFIER_CLASS[n]}`);
+    // `hasOwn`: servers send names like `constructor` (jdtls) that `Object.prototype` also has.
+    for (const n of names) if (Object.hasOwn(MODIFIER_CLASS, n)) classes.push(`cm-sem-${MODIFIER_CLASS[n]}`);
     if (language === "python" && names.includes("static")) classes.push("cm-sem-python-static");
     const local =
       rainbow &&
